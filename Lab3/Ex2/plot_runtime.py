@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plotRuntime(filename):
+def plotRuntime(filename, color, axs, name):
     f = open(filename, "r")
 
     runtime = []
@@ -29,18 +29,25 @@ def plotRuntime(filename):
 
     speedup = np.divide(runtime[0], runtime)
     dspeedup = np.multiply(np.divide(-1, np.power(runtime,2)), error_bars)
-    plt.subplot(2,1,1)
-    plt.plot(threads, runtime)
-    plt.errorbar(threads, runtime, yerr=dspeedup, capthick=1, capsize=3, ecolor="k")
-    plt.ylabel("Time, s")
-    plt.subplot(2,1,2)
-    plt.errorbar(threads, speedup, yerr=dspeedup, capthick=1, capsize=3, ecolor="k")
-    plt.ylabel("Speedup")
-    plt.xlabel("Threads")
+   # plt.subplot(2,1,1)
+   # plt.plot(threads, runtime, c=color)
+    axs[0].errorbar(threads, runtime, yerr=dspeedup, capthick=1, capsize=3, ecolor="k", c=color, label = name)
+   # plt.ylabel("Time, s")
+   # plt.subplot(2,1,2)
+    axs[1].errorbar(threads, speedup, yerr=dspeedup, capthick=1, capsize=3, ecolor="k", c = color, label = name)
+    #plt.ylabel("Speedup")
+    #plt.xlabel("Threads")
 
 
 
 if __name__ == "__main__":
-    plotRuntime("runtime_binary.txt")
-    plotRuntime("runtime_linear.txt")
+    fig, axs = plt.subplots(2, 1)
+    axs[0].set_ylabel("Time, s")
+    axs[1].set_ylabel("Speedup")
+    axs[1].set_xlabel("Threads")
+    plotRuntime("runtime_binary.txt", "b", axs, "Binary")
+    plotRuntime("runtime_linear.txt", "r", axs, "Linear")
+    plotRuntime("runtime_nonblocking.txt", "g", axs, "Nonblocking")
+    axs[0].legend(loc="upper right")
+    axs[1].legend(loc="lower right")
     plt.show()
