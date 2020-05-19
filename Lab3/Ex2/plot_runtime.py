@@ -48,6 +48,8 @@ if __name__ == "__main__":
     plotRuntime("runtime_binary.txt", "b", axs, "Binary")
     plotRuntime("runtime_linear.txt", "r", axs, "Linear")
     plotRuntime("runtime_nonblocking.txt", "g", axs, "Nonblocking")
+    plotRuntime("runtime_gather.txt", "y", axs, "Gather")
+    plotRuntime("runtime_reduce3.txt", "m", axs, "Reduce")
     axs[0].legend(loc="upper right")
     axs[1].legend(loc="lower right")
     plt.show()
