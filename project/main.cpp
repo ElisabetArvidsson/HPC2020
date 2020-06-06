@@ -6,7 +6,7 @@
 
 
 // Define constants
-#define N 16
+#define N 8
 #define SEED 42
 
 // Define precision types. Choose float or double, same for both types
@@ -16,11 +16,13 @@ MPI_Datatype mpitype = MPI_FLOAT;
 
 // Method declarations
 void matmul(ftype* A, ftype* B, ftype* C, size_t size);
-void broadcastA(ftype* A, int iteration, int row, int col, MPI_Comm comm);
-void rollupB(ftype* B, MPI_Comm comm);
-void initializeMatrices(ftype* A, ftype* B, ftype* C, size_t size);
 ftype sumMatrix(ftype* M, size_t size);
-
+void printMatrix(ftype* matrix, size_t size, int rank);
+void randomMatrix(ftype* M, size_t size);
+void eye(ftype* M, size_t size);
+void parallelMultiply(ftype* A, ftype* B, ftype* C, ftype* tmp, size_t size, 
+	MPI_Comm* comm_rows, MPI_Comm* comm_cols, size_t gridsize);
+void initialize(ftype* M, size_t size, size_t gridsize, int rank);
 
 
 int main(int argc, char *argv[])
@@ -35,13 +37,22 @@ int main(int argc, char *argv[])
 
 	num_threads = omp_get_max_threads();
 
+	size_t gridsize, col, row;
+	gridsize = (size_t) sqrt(num_proc);
+	size_t size = N/gridsize;	// Size of each matrix block
+
 	if(thread_level < MPI_THREAD_FUNNELED){
 		printf("Insufficient level of thread support provided; %d\n", thread_level);
 		return -1;
 	}
 
-	if(N % num_proc != 0){
-		printf("Matrix size %d is not a multiple of number of processes %d\n", N, num_proc);
+	if(gridsize*gridsize != num_proc && !rank){
+		printf("Number of processes (%d) is not a square number\n", num_proc);
+		return -3;
+	}
+
+	if(size*gridsize != N){
+		printf("Matrix size %d is not a multiple of sqrt(number of processes) %zu\n", N, gridsize);
 		return -2;
 	}
 
@@ -52,12 +63,6 @@ int main(int argc, char *argv[])
 
 	// ================================================================================= //
 	// Create MPI communicators for vertical and horizontal communication.
-	int gridsize, col, row;
-	gridsize = (int) sqrt(num_proc);
-	if(gridsize*gridsize != num_proc && !rank){
-		printf("Number of processes (%d) is not a square number. Exiting\n", num_proc);
-		return -3;
-	}
 
 	col = rank % gridsize;
 	row = rank/gridsize;
@@ -70,14 +75,15 @@ int main(int argc, char *argv[])
 	// Allocate memory and initialize matrices
 
 	ftype *A, *B, *C, *tmp;		// Pointers to matrices
-	size_t size = N/gridsize;	// Size of each matrix block
 
 	A = (ftype*) malloc(size*size*sizeof(ftype));
 	B = (ftype*) malloc(size*size*sizeof(ftype));
 	C = (ftype*) malloc(size*size*sizeof(ftype));
 	tmp = (ftype*) malloc(size*size*sizeof(ftype));
 
-	initializeMatrices(A, B, C, size);
+	srand(SEED);
+	initialize(A, size, gridsize, rank);
+	printf("Rank %d: sum:%f\n", rank, sumMatrix(A, size));
 
 
 	// ================================================================================= //
@@ -93,57 +99,129 @@ int main(int argc, char *argv[])
 	free(C);
 	free(tmp);
 
+	MPI_Finalize();
+
 	return 0;
 }
 
-inline unsigned int index(unsigned int row, unsigned int col, unsigned int stride){
-	return row + col * stride;
+inline size_t index(unsigned int row, unsigned int col, unsigned int stride){
+	return (size_t) (row + col * stride);
 }
 
-void initializeMatrices(ftype* A, ftype* B, ftype* C, size_t size){
-
-	srand(SEED);
-	int i,j;
+// Generate random matrix
+void randomMatrix(ftype* M, size_t size){
+	unsigned int i,j;
 	for (i=0; i<size; i++){
 		for (j=0; j<size; j++){
-			A[index(i, j, size)] = (ftype) rand() / RAND_MAX;
-
+			M[index(i, j, size)] = ((ftype) rand()/RAND_MAX);
 		}
 	}
-	memset(C, 0, sizeof(ftype)*size*size);
+}
+
+// Set M to identity matrix of size size
+void eye(ftype* M, size_t size){
+	memset(&M, 0, sizeof(ftype)*size*size);
+	for(unsigned int i=0; i<size; i++){
+		M[index(i,i,size)] = 1.0;
+	}
+}
+
+// Scatter matrix data to other mpi processes
+void scatterMatrix(ftype* send, ftype* recv, size_t size, size_t gridsize, int rank){
+
+	// Create a MPI datatype for a matrix block
+	MPI_Datatype blk_type;
+	MPI_Datatype matrix_type;
+
+	MPI_Type_vector(size, size, N, mpitype, &blk_type);
+	MPI_Type_create_resized(blk_type, 0, sizeof(ftype), &matrix_type);
+	MPI_Type_commit(&matrix_type);
+
+	// Set offsets in main array for where subblocks start
+	int offsets[gridsize*gridsize];
+	int sendc[gridsize*gridsize];
+	unsigned int o = 0;
+
+	for(unsigned int i=0; i<gridsize; i++){
+		for(unsigned int j=0; j<gridsize; j++){
+			sendc[o] = 1;
+			offsets[o] = (j*N*size + i*size);
+			o++;
+		}
+	}
+	
+	// Send data to other processes.
+	MPI_Scatterv(send, sendc, offsets, matrix_type, recv, size*size, mpitype, 0, MPI_COMM_WORLD);
+
+}
+
+void initialize(ftype* M, size_t size, size_t gridsize, int rank){
+
+	ftype* glob;
+	if(rank == 0){
+		glob = (ftype*) malloc(N*N*sizeof(ftype));
+		randomMatrix(glob, N);
+		// printMatrix(glob, N, rank);
+		printf("Global sum: %f\n", sumMatrix(glob, N));
+	}
+	scatterMatrix(glob, M, size, gridsize, rank);
+
+	if(rank == 0)
+		free(glob);
+
+}
+
+void printMatrix(ftype* matrix, size_t size, int rank){
+
+	int length = size*size*8 + size +10;
+	char s[length];
+
+	sprintf(s, "Rank %02d:\n", rank);
+	int offset = 9;
+	
+	for (int i=0; i<size; i++){
+		for (int j=0; j<size; j++){
+			sprintf(&s[offset], "%.05f ", matrix[index(i,j,size)]);
+			offset += 8;
+		}
+		sprintf(&s[offset], "\n");
+		offset += 1;
+	} 
+	std::cout << s;
+
 }
 
 void parallelMultiply(ftype* A, ftype* B, ftype* C, ftype* tmp, size_t size, 
-	MPI_Comm* comm_rows, MPI_Comm* comm_cols, int gridsize){
+	MPI_Comm* comm_rows, MPI_Comm* comm_cols, size_t gridsize){
 
 	// Get mpi-ranks in different comm groups
 	int world_rank, row_rank, col_rank;
 	MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-	MPI_Comm_rank(comm_rows, &row_rank);
-	MPI_Comm_rank(comm_cols, &col_rank);
+	MPI_Comm_rank(*comm_rows, &row_rank);
+	MPI_Comm_rank(*comm_cols, &col_rank);
 
 	// Set C to zero.
 	memset(&C, 0, sizeof(ftype)*size*size);
 
-	for (int i=0; i<gridsize; i++){
+	for (unsigned int i=0; i<gridsize; i++){
 
 		// Diagonal+i broadcast A in row
 		if((row_rank + i) % gridsize == col_rank){
 			memcpy(&tmp, &A, sizeof(ftype)*size*size);
 		}
-		MPI_Bcast(&tmp, size*size, mpitype, (row_rank+i) % gridsize, mpi_comm_row);
+		MPI_Bcast(&tmp, size*size, mpitype, (row_rank+i) % gridsize, *comm_rows);
 		
 		// Multiply AxB and add to C
-		matmul(&tmp, &B, &C, size);
+		matmul(tmp, B, C, size);
 
 		// Send B to process 'above' and receive from 'below'
 		MPI_Request rsend, rrecv;
-		MPI_ISend(&B, size*size, mpitype, (col_rank-1) % gridsize, i, comm_cols, &rsend);
-		MPI_IRecv(&tmp, size*size, mpitype, (col_rank+1) % gridsize, i, comm_cols, &rrecv);
+		MPI_Isend(&B, size*size, mpitype, (col_rank-1) % gridsize, i, *comm_cols, &rsend);
+		MPI_Irecv(&tmp, size*size, mpitype, (col_rank+1) % gridsize, i, *comm_cols, &rrecv);
 
 		// Wait for data to be sent and received
-		MPI_Wait(rsend, MPI_STATUS_IGNORE);
-		MPI_Wait(rrecv, MPI_STATUS_IGNORE);
+		MPI_Wait(&rsend, MPI_STATUS_IGNORE);
+		MPI_Wait(&rrecv, MPI_STATUS_IGNORE);
 
 		// Copy B from tmp array to B
 		memcpy(&tmp, &B, sizeof(ftype)*size*size);
