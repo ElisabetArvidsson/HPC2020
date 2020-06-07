@@ -6,16 +6,19 @@
 
 
 // Define constants
-#define N 64
+#define BLOCK 8
 #define SEED 42
+#define ITERATIONS 10
 
 // Define precision types. Choose float or double, same for both types
-typedef float ftype;
-MPI_Datatype mpitype = MPI_FLOAT;
+typedef double ftype;
+MPI_Datatype mpitype = MPI_DOUBLE;
 
 
 // Method declarations
 void matmul(ftype* A, ftype* B, ftype* C, size_t size);
+void optMatmul(ftype* A, ftype* B, ftype* C, size_t size);
+
 ftype sumMatrix(ftype* M, size_t size);
 ftype sumMatrix(ftype* M, size_t size, MPI_Comm comm);
 
@@ -32,6 +35,16 @@ void initialize(ftype* M, size_t size, size_t gridsize, int rank,
 int main(int argc, char *argv[])
 {
 
+	int N = 64;
+	int argi = 0;
+	while(argi < argc){
+		if(!strcmp("-n", argv[argi]) && argc >= argi + 1){
+			N = atoi(argv[argi+1]);
+			argi++;
+		}
+		argi++;
+	}
+
 	// ================================================================================= //
 	// Init MPI
 	int rank, num_proc, num_threads, thread_level;
@@ -43,7 +56,7 @@ int main(int argc, char *argv[])
 
 	size_t gridsize, col, row;
 	gridsize = (size_t) sqrt(num_proc);
-	size_t size = N/gridsize;	// Size of each matrix block
+	size_t size = N / gridsize;	// Size of each matrix block
 
 	if(thread_level < MPI_THREAD_FUNNELED){
 		printf("Insufficient level of thread support provided; %d\n", thread_level);
@@ -63,13 +76,14 @@ int main(int argc, char *argv[])
 	if(!rank){
 		printf("Initialized %d mpi processes with %d omp threads\n", num_proc, num_threads);
 		printf("%d parallel processors in total\n", num_proc*num_threads);
+		printf("%dx%d size global matrix\n", N, N);
 	}
 
 	// ================================================================================= //
 	// Create MPI communicators for vertical and horizontal communication.
 
 	col = rank % gridsize;
-	row = rank/gridsize;
+	row = rank / gridsize;
 
 	MPI_Comm mpi_comm_row, mpi_comm_col;
 	MPI_Comm_split(MPI_COMM_WORLD, row, rank, &mpi_comm_row);
@@ -92,11 +106,21 @@ int main(int argc, char *argv[])
 	// ================================================================================= //
 	// TODO Calculate C = AxB and measure performance
 
-	parallelMultiply(A, B, C, tmp, size, &mpi_comm_row, &mpi_comm_col, gridsize);
-	ftype sum = sumMatrix(C, size, MPI_COMM_WORLD);
-	if(rank == 0){
-		printf("Sum of global result: %f\n", sum);
+	double t1, t2;
+	ftype sum;
+
+	for (int i=0; i<ITERATIONS; i++){
+		t1 = MPI_Wtime();
+		parallelMultiply(A, B, C, tmp, size, &mpi_comm_row, &mpi_comm_col, gridsize);
+		t2 += MPI_Wtime()-t1;
+
+		sum = sumMatrix(C, size, MPI_COMM_WORLD);
+		if(rank == 0){
+			printf("Time: %f, sum: %f\n", MPI_Wtime()-t1, sum);
+		}
 	}
+	if(rank == 0)
+		printf("Avg time: %f\n", t2/(double)ITERATIONS);
 
 	// ================================================================================= //
 	// Deallocate memory and close mpi communication
@@ -112,7 +136,7 @@ int main(int argc, char *argv[])
 }
 
 inline size_t index(unsigned int row, unsigned int col, unsigned int stride){
-	return (size_t) (row + col * stride);
+	return (size_t) (row * stride + col);
 }
 
 // Generate random matrix
@@ -140,11 +164,11 @@ void scatterMatrix(ftype* send, ftype* recv, size_t size, size_t gridsize, int r
 	MPI_Datatype blk_type;
 	MPI_Datatype matrix_type;
 
-	MPI_Type_vector(size, size, N, mpitype, &blk_type);
+	MPI_Type_vector(size, size, size*gridsize, mpitype, &blk_type);
 	MPI_Type_create_resized(blk_type, 0, sizeof(ftype), &matrix_type);
 	MPI_Type_commit(&matrix_type);
 
-	// Set offsets in main array for where subblocks start
+	// Set offsets in main array for where sub-blocks start
 	int offsets[gridsize*gridsize];
 	int sendc[gridsize*gridsize];
 	unsigned int o = 0;
@@ -152,7 +176,7 @@ void scatterMatrix(ftype* send, ftype* recv, size_t size, size_t gridsize, int r
 	for(unsigned int i=0; i<gridsize; i++){
 		for(unsigned int j=0; j<gridsize; j++){
 			sendc[o] = 1;
-			offsets[o] = (j*N*size + i*size);
+			offsets[o] = j*size*gridsize*size + i*size;
 			o++;
 		}
 	}
@@ -166,9 +190,9 @@ void initialize(ftype* M, size_t size, size_t gridsize, int rank, void(*init)(ft
 
 	ftype* glob;
 	if(rank == 0){
-		glob = (ftype*) malloc(N*N*sizeof(ftype));
-		init(glob, N);
-		printf("Global sum: %f\n", sumMatrix(glob, N));
+		glob = (ftype*) malloc(size*gridsize*size*gridsize*sizeof(ftype));
+		init(glob, size*gridsize);
+		printf("Global sum: %f\n", sumMatrix(glob, size*gridsize));
 	}
 	scatterMatrix(glob, M, size, gridsize, rank);
 
@@ -275,5 +299,17 @@ void matmul(ftype* A, ftype* B, ftype* C, size_t size){
 		for(j=0; j<size; j++)
 			for(k=0; k<size; k++)
 				C[index(i,j,size)] += A[index(i,k,size)]*B[index(k,j,size)];
+
+}
+
+void optMatmul(ftype* A, ftype* B, ftype* C, size_t size){
+
+	unsigned int i,j,k;
+	#pragma omp parallel for private(i,j,k)
+	for (i=0; i<size; i++)
+		for(k=0; k<size; k++)
+			for(j=0; j<size; j++)
+				C[index(i,j,size)] += A[index(i,k,size)]*B[index(k,j,size)];
+
 
 }
