@@ -16,8 +16,8 @@
 #define MODE_BENCHMARK 2
 
 // Define precision types. Choose float or double, same for both types
-typedef float ftype;
-MPI_Datatype mpitype = MPI_FLOAT;
+typedef double ftype;
+MPI_Datatype mpitype = MPI_DOUBLE;
 
 
 // Method declarations
